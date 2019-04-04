@@ -39,7 +39,8 @@ type Endpoints struct {
 
 	TaskInfoEndpoint endpoint.Endpoint
 
-	OpenAPIEndpoint endpoint.Endpoint
+	OpenAPIEndpoint    endpoint.Endpoint
+	DiskResizeEndpoint endpoint.Endpoint
 }
 
 // New returns an Endpoints struct where each endpoint invokes
@@ -103,6 +104,9 @@ func New(s service.Service, logger log.Logger) Endpoints {
 	openAPIEndpoint := MakeOpenAPIEndpoint(s)
 	openAPIEndpoint = LoggingMiddleware(log.With(logger, "endpoint", "OpenAPIEndpoint"))(openAPIEndpoint)
 
+	diskResizeEndpoint := MakeVMDiskResize(s)
+	diskResizeEndpoint = LoggingMiddleware(log.With(logger, "endpoint", "DiskInflateEndpoint"))(diskResizeEndpoint)
+
 	return Endpoints{
 		InfoEndpoint: infoEndpoint,
 
@@ -134,7 +138,8 @@ func New(s service.Service, logger log.Logger) Endpoints {
 
 		TaskInfoEndpoint: taskInfoEndpoint,
 
-		OpenAPIEndpoint: openAPIEndpoint,
+		OpenAPIEndpoint:    openAPIEndpoint,
+		DiskResizeEndpoint: diskResizeEndpoint,
 	}
 }
 

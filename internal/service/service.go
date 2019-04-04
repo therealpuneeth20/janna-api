@@ -3,6 +3,7 @@ package service
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/url"
@@ -90,6 +91,8 @@ type Service interface {
 
 	// VMRename renames Virtual Machine
 	VMRename(context.Context, *types.VMRenameParams) error
+	//VMDiskInflate
+	VMDiskResize(ctx context.Context, params *types.VMDiskResizeParams) error
 }
 
 // service implements our Service
@@ -426,6 +429,112 @@ func (s *service) VMRename(ctx context.Context, params *types.VMRenameParams) er
 	return vm.Rename(ctx, params.Name)
 }
 
+// Reference from govmomi/govc/vm/disk/change.go
+func (s *service) VMDiskResize(ctx context.Context, params *types.VMDiskResizeParams) error {
+
+	vm, err := findByPath(ctx, s.Client, params.Datacenter, params.VMName)
+	if err != nil {
+		return err
+	}
+	//power of the virtual machine before resizing.
+	task, err := vm.PowerOff(ctx)
+	if err != nil {
+		return err
+	}
+	//wait until its powered off.
+	err = task.Wait(ctx)
+	if err != nil {
+		return err
+	}
+
+	if vm == nil {
+		return flag.ErrHelp
+	}
+
+	devices, err := vm.Device(ctx)
+	if err != nil {
+		return err
+	}
+
+	editdisk, err := findDisk(ctx, devices, params)
+	if err != nil {
+		return err
+	}
+
+	/*if int64(params.Size) != 0 {
+		editdisk.CapacityInKB = int64(params.bytes) / 1024
+	}
+	*/
+
+	backing := editdisk.Backing.(*vmware_types.VirtualDiskFlatVer2BackingInfo)
+	backing.Sharing = params.Sharing
+
+	if len(params.Mode) != 0 {
+		backing.DiskMode = params.Mode
+	}
+
+	spec := vmware_types.VirtualMachineConfigSpec{}
+
+	config := &vmware_types.VirtualDeviceConfigSpec{
+		Device:        editdisk,
+		Operation:     vmware_types.VirtualDeviceConfigSpecOperationEdit,
+		FileOperation: "",
+	}
+
+	spec.DeviceChange = append(spec.DeviceChange, config)
+
+	task, err = vm.Reconfigure(ctx, spec)
+	if err != nil {
+		return err
+	}
+
+	err = task.Wait(ctx)
+	if err != nil {
+		return fmt.Errorf("error resizing main disk\nLogged Item:  %s", err)
+	}
+	return nil
+}
+
+func findDisk(ctx context.Context, list object.VirtualDeviceList, params *types.VMDiskResizeParams) (*vmware_types.VirtualDisk, error) {
+	var disks []*vmware_types.VirtualDisk
+	for _, device := range list {
+		switch md := device.(type) {
+		case *vmware_types.VirtualDisk:
+			if checkDiskProperties(ctx, list.Name(device), md, params) {
+				disks = append(disks, md)
+			}
+		default:
+			continue
+		}
+	}
+
+	switch len(disks) {
+	case 0:
+		return nil, errors.New("no disk found using the given values")
+	case 1:
+		return disks[0], nil
+	}
+	return nil, errors.New("the given disk values match multiple disks")
+}
+
+func checkDiskProperties(ctx context.Context, name string, disk *vmware_types.VirtualDisk, params *types.VMDiskResizeParams) bool {
+	switch {
+	case params.DiskUUID != 0 && disk.Key != int32(params.DiskUUID):
+		fallthrough
+	case params.DiskName != "" && name != params.DiskName:
+		fallthrough
+	case params.DiskLabel != "" && disk.DeviceInfo.GetDescription().Label != params.DiskLabel:
+		return false
+	case params.DiskFilePath != "":
+		if b, ok := disk.Backing.(vmware_types.BaseVirtualDeviceFileBackingInfo); ok {
+			if b.GetVirtualDeviceFileBackingInfo().FileName != params.DiskFilePath {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func newWithObjectVM(vmwareVM *object.VirtualMachine) *domain.VirtualMachine {
 	return &domain.VirtualMachine{
 		VMWareVM: vmwareVM,
@@ -536,6 +645,24 @@ func findByPath(ctx context.Context, client *vim25.Client, DCname, path string) 
 	f.SetDatacenter(dc)
 
 	return f.VirtualMachine(ctx, path)
+}
+
+// find DataStore by path and return datastore info.
+func findDatacenterAndDataStore(ctx context.Context, client *vim25.Client, DCname, DataStorePath string) (*object.Datacenter, *object.Datastore, error) {
+	f := find.NewFinder(client, true)
+
+	dc, err := f.DatacenterOrDefault(ctx, DCname)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	f.SetDatacenter(dc)
+	ds, err := f.Datastore(ctx, DataStorePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return dc, ds, nil
 }
 
 func vmSnapshots(ctx context.Context, vm *object.VirtualMachine) ([]domain.Snapshot, error) {
